@@ -21,11 +21,18 @@ class Color(Enum):
 class Move:
     """Класс для хранения информации о ходе (для отката)"""
     def __init__(self, from_pos: Tuple[int, int], to_pos: Tuple[int, int], 
-                 captured_piece: Optional['Piece'] = None, last_move_for_pawn: Optional[Tuple[int, int]] = None):
+                 piece: Optional['Piece'] = None,
+                 captured_piece: Optional['Piece'] = None, 
+                 captured_en_passant: Optional['Piece'] = None,
+                 last_move_for_pawn: Optional[Tuple[int, int]] = None,
+                 piece_was_moved: bool = False):
         self.from_pos = from_pos
         self.to_pos = to_pos
-        self.captured_piece = captured_piece
+        self.piece = piece  # Исходная фигура (до хода)
+        self.captured_piece = captured_piece  # Фигура, которая была на целевой позиции
+        self.captured_en_passant = captured_en_passant  # Пешка, съедена при взятии на проходе
         self.last_move_for_pawn = last_move_for_pawn  # Для взятия на проходе
+        self.piece_was_moved = piece_was_moved  # Был ли у фигуры уже сделан ход
 
 
 class PieceType(Enum):
@@ -314,10 +321,11 @@ class Board:
         captured_piece = self.get_piece(to_row, to_col)
         
         # Обработка взятия на проходе для пешек
+        captured_en_passant = None
         if isinstance(piece, Pawn) and captured_piece is None and to_col != from_col:
             # Это взятие на проходе
             enemy_pawn_row = from_row
-            captured_piece = self.get_piece(enemy_pawn_row, to_col)
+            captured_en_passant = self.get_piece(enemy_pawn_row, to_col)
             self.grid[enemy_pawn_row][to_col] = None
         
         # Сохранить последний ход пешки для взятия на проходе
@@ -332,7 +340,11 @@ class Board:
         else:
             self.last_pawn_move = None
         
+        # Сохранить было ли у фигуры уже сделан ход
+        piece_was_moved = piece.has_moved
+        
         # Выполнить ход
+        original_piece = piece  # Сохраняем ссылку на оригинальную фигуру
         self.grid[to_row][to_col] = piece
         self.grid[from_row][from_col] = None
         piece.position = (to_row, to_col)
@@ -346,7 +358,8 @@ class Board:
                 self.grid[to_row][to_col] = new_piece
         
         # Сохранить ход в историю
-        move = Move((from_row, from_col), (to_row, to_col), captured_piece, last_pawn_move)
+        move = Move((from_row, from_col), (to_row, to_col), 
+                   original_piece, captured_piece, captured_en_passant, last_pawn_move, piece_was_moved)
         self.move_history.append(move)
         
         return True
@@ -358,17 +371,25 @@ class Board:
         
         move = self.move_history.pop()
         
-        # Вернуть фигуру на место
-        piece = self.get_piece(move.to_pos[0], move.to_pos[1])
-        if piece:
-            self.grid[move.from_pos[0]][move.from_pos[1]] = piece
-            self.grid[move.to_pos[0]][move.to_pos[1]] = None
-            piece.position = move.from_pos
-            piece.has_moved = False
+        # Очистить целевую позицию
+        self.grid[move.to_pos[0]][move.to_pos[1]] = None
         
-        # Вернуть захваченную фигуру
+        # Вернуть исходную фигуру на исходную позицию
+        if move.piece:
+            self.grid[move.from_pos[0]][move.from_pos[1]] = move.piece
+            move.piece.position = move.from_pos
+            move.piece.has_moved = move.piece_was_moved  # Восстановить исходное состояние
+        
+        # Вернуть захваченную фигуру (если была съедена на целевой позиции)
         if move.captured_piece:
             self.grid[move.to_pos[0]][move.to_pos[1]] = move.captured_piece
+        
+        # Вернуть захваченную пешку (если было взятие на проходе)
+        if move.captured_en_passant:
+            # Пешка была съедена на исходной позиции врага
+            enemy_row = move.from_pos[0]  # Строка исходной позиции текущей пешки
+            enemy_col = move.to_pos[1]    # Столбец целевой позиции
+            self.grid[enemy_row][enemy_col] = move.captured_en_passant
         
         # Вернуть последний ход пешки
         self.last_pawn_move = move.last_move_for_pawn
@@ -597,8 +618,30 @@ class ChessGame:
             self.selected_position = None
             self.possible_moves = []
     
+    def get_threatened_pieces(self) -> List[Tuple[int, int]]:
+        """Получить список позиций фигур текущего игрока, которые под угрозой"""
+        threatened = []
+        enemy_color = Color.BLACK if self.current_player == Color.WHITE else Color.WHITE
+        
+        # Пройти по всем фигурам врага
+        for row in range(8):
+            for col in range(8):
+                enemy_piece = self.board.get_piece(row, col)
+                if enemy_piece and enemy_piece.color == enemy_color:
+                    # Получить все возможные ходы этой фигуры врага
+                    enemy_moves = enemy_piece.get_possible_moves(self.board)
+                    # Добавить все позиции фигур текущего игрока в списке ходов врага
+                    for move_pos in enemy_moves:
+                        target = self.board.get_piece(move_pos[0], move_pos[1])
+                        if target and target.color == self.current_player:
+                            threatened.append(move_pos)
+        
+        return threatened
+    
     def draw_board(self):
         """Нарисовать доску"""
+        threatened_positions = self.get_threatened_pieces()
+        
         for row in range(8):
             for col in range(8):
                 rect = pygame.Rect(col * self.square_size, row * self.square_size,
@@ -609,6 +652,10 @@ class ChessGame:
                     pygame.draw.rect(self.screen, self.light_color, rect)
                 else:
                     pygame.draw.rect(self.screen, self.dark_color, rect)
+                
+                # Выделить угрожаемые фигуры оранжевым цветом
+                if (row, col) in threatened_positions:
+                    pygame.draw.rect(self.screen, (255, 165, 0), rect, 3)
                 
                 # Выделить выбранную фигуру
                 if self.selected_position == (row, col):
@@ -910,6 +957,46 @@ class CheckersBoard:
         self.move_history.append(((from_row, from_col), (to_row, to_col), captured))
         
         return True
+    
+    def undo_move(self) -> bool:
+        """Отменить последний ход в шашках"""
+        if not self.move_history:
+            return False
+        
+        from_pos, to_pos, captured = self.move_history.pop()
+        from_row, from_col = from_pos
+        to_row, to_col = to_pos
+        
+        # Получить фигуру, которая была на целевой позиции
+        piece = self.get_piece(to_row, to_col)
+        if not piece:
+            return False
+        
+        # Вернуть фигуру на исходную позицию
+        self.grid[from_row][from_col] = piece
+        self.grid[to_row][to_col] = None
+        piece.row = from_row
+        piece.col = from_col
+        
+        # Вернуть захваченную фигуру
+        if captured:
+            mid_row = (from_row + to_row) // 2
+            mid_col = (from_col + to_col) // 2
+            self.grid[mid_row][mid_col] = captured
+        
+        # Если фигура была дамкой, но не превратилась в этом ходе, оставляем её дамкой
+        # Если она превратилась в этом ходе, нужно вернуть в пешку
+        if piece.is_king:
+            # Проверяем, была ли это белая фигура, которая достигла верхнего края
+            if piece.color == Color.WHITE and to_row == 0 and from_row != 0:
+                # Фигура только что превратилась, возвращаем в пешку
+                piece.is_king = False
+            # Или чёрная фигура, которая достигла нижнего края
+            elif piece.color == Color.BLACK and to_row == 7 and from_row != 7:
+                # Фигура только что превратилась, возвращаем в пешку
+                piece.is_king = False
+        
+        return True
 
 
 class CheckersGame:
@@ -947,9 +1034,19 @@ class CheckersGame:
         self.font = pygame.font.Font(None, 36)
         self.font_small = pygame.font.Font(None, 24)
         self.menu_button = pygame.Rect(0, 0, 0, 0)
+        self.undo_button = pygame.Rect(0, 0, 0, 0)  # Кнопка отката
     
     def handle_click(self, pos: Tuple[int, int]):
         """Обработать клик"""
+        # Проверить клик на кнопку отката
+        if hasattr(self, 'undo_button') and self.undo_button.collidepoint(pos):
+            if self.board.undo_move():
+                # Отменили последний ход
+                self.current_player = Color.BLACK if self.current_player == Color.WHITE else Color.WHITE
+                self.selected_position = None
+                self.possible_moves = []
+            return
+        
         # Проверить клик на кнопку меню
         if self.menu_button.collidepoint(pos):
             self.running = False
@@ -1021,8 +1118,30 @@ class CheckersGame:
         
         return moves
     
+    def get_threatened_pieces(self) -> List[Tuple[int, int]]:
+        """Получить список позиций фигур текущего игрока, которые под угрозой"""
+        threatened = []
+        enemy_color = Color.BLACK if self.current_player == Color.WHITE else Color.WHITE
+        
+        # Пройти по всем фигурам врага
+        for row in range(8):
+            for col in range(8):
+                enemy_piece = self.board.get_piece(row, col)
+                if enemy_piece and enemy_piece.color == enemy_color:
+                    # Получить все возможные ходы этой фигуры врага
+                    enemy_moves = enemy_piece.get_possible_moves(self.board)
+                    # Добавить все позиции фигур текущего игрока в списке ходов врага
+                    for move_pos in enemy_moves:
+                        target = self.board.get_piece(move_pos[0], move_pos[1])
+                        if target and target.color == self.current_player:
+                            threatened.append(move_pos)
+        
+        return threatened
+    
     def draw_board(self):
         """Нарисовать доску"""
+        threatened_positions = self.get_threatened_pieces()
+        
         for row in range(8):
             for col in range(8):
                 rect = pygame.Rect(col * self.square_size, row * self.square_size,
@@ -1033,6 +1152,10 @@ class CheckersGame:
                     pygame.draw.rect(self.screen, self.light_color, rect)
                 else:
                     pygame.draw.rect(self.screen, self.dark_color, rect)
+                
+                # Выделить угрожаемые фигуры оранжевым цветом
+                if (row, col) in threatened_positions:
+                    pygame.draw.rect(self.screen, (255, 165, 0), rect, 3)
                 
                 # Выделить выбранную фигуру
                 if self.selected_position == (row, col):
@@ -1087,8 +1210,18 @@ class CheckersGame:
         player_text_rect = player_text.get_rect(center=player_box.center)
         self.screen.blit(player_text, player_text_rect)
         
+        # Кнопка Отката
+        y_offset += 100
+        self.undo_button = pygame.Rect(self.board_size + 10, y_offset, self.panel_width - 20, 40)
+        pygame.draw.rect(self.screen, (100, 150, 200), self.undo_button)
+        pygame.draw.rect(self.screen, (255, 255, 255), self.undo_button, 2)
+        
+        undo_text = small_font.render("Ход назад", True, (255, 255, 255))
+        undo_rect = undo_text.get_rect(center=(self.board_size + self.panel_width // 2, y_offset + 20))
+        self.screen.blit(undo_text, undo_rect)
+        
         # Кнопка Меню
-        y_offset += 120
+        y_offset += 55
         self.menu_button = pygame.Rect(self.board_size + 10, y_offset, self.panel_width - 20, 50)
         pygame.draw.rect(self.screen, (100, 150, 200), self.menu_button)
         pygame.draw.rect(self.screen, (255, 255, 255), self.menu_button, 2)
